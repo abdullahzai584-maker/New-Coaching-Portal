@@ -72,27 +72,6 @@ export async function POST(req: NextRequest) {
   try {
     await connectMongo();
 
-    const existingCount = await UserModel.countDocuments();
-    if (existingCount === 0) {
-      await UserModel.insertMany([
-        {
-          name: 'Portal Owner',
-          email: 'owner@ourcoaching.pk',
-          password: 'owner123',
-          role: 'owner',
-          feeStatus: 'Paid',
-        },
-        {
-          name: 'Trial Coaching',
-          email: 'trial@ourcoaching.pk',
-          password: 'trial123',
-          role: 'trial',
-          trialStartDate: new Date(),
-          feeStatus: 'Paid',
-        },
-      ]);
-    }
-
     const body: any = await req.json();
     const email = String(body?.email || '')
       .toLowerCase()
@@ -106,7 +85,29 @@ export async function POST(req: NextRequest) {
       );
     }
 
-    const dbUser: any = await UserModel.findOne({ email }).lean();
+    let dbUser: any = await UserModel.findOne({ email }).lean();
+
+    if (!dbUser && email === 'owner@ourcoaching.pk') {
+      const createdOwner = await UserModel.create({
+        name: 'Portal Owner',
+        email: 'owner@ourcoaching.pk',
+        password: password || 'owner123',
+        role: 'owner',
+        feeStatus: 'Paid',
+      });
+      dbUser = createdOwner.toObject();
+    } else if (!dbUser && email === 'trial@ourcoaching.pk') {
+      const createdTrial = await UserModel.create({
+        name: 'Trial Coaching',
+        email: 'trial@ourcoaching.pk',
+        password: password || 'trial123',
+        role: 'trial',
+        trialStartDate: new Date(),
+        feeStatus: 'Paid',
+      });
+      dbUser = createdTrial.toObject();
+    }
+
     if (!dbUser || dbUser.password !== password) {
       return NextResponse.json(
         { error: 'Galat email ya password hai.' },
