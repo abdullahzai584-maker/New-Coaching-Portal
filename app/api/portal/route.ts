@@ -1,12 +1,49 @@
 import { NextRequest, NextResponse } from 'next/server';
+import mongoose from 'mongoose';
 import dbConnect from '@/lib/db';
-import User from '@/models/User';
-import PortalConfig from '@/models/PortalConfig';
-import Attendance from '@/models/Attendance';
 
-const UserModel: any = User;
-const ConfigModel: any = PortalConfig;
-const AttendanceModel: any = Attendance;
+const UserSchema = new mongoose.Schema(
+  {
+    name: String,
+    email: { type: String, required: true, unique: true },
+    password: { type: String, required: true },
+    plainPasswordHint: String,
+    role: { type: String, default: 'student' },
+    classGrade: String,
+    feeStatus: { type: String, default: 'Paid' },
+    trialStartDate: Date,
+    ipAddress: String,
+    lastLoginAt: Date,
+  },
+  { timestamps: true, strict: false }
+);
+
+const PortalConfigSchema = new mongoose.Schema(
+  {
+    key: { type: String, required: true, unique: true },
+    killSwitchActive: { type: Boolean, default: false },
+    ipAttendanceLock: { type: Boolean, default: false },
+    allowedCoachingIP: String,
+  },
+  { timestamps: true, strict: false }
+);
+
+const AttendanceSchema = new mongoose.Schema(
+  {
+    studentId: { type: String, required: true },
+    studentName: String,
+    date: { type: String, required: true },
+    status: { type: String, default: 'Present' },
+    markedBy: String,
+  },
+  { timestamps: true, strict: false }
+);
+
+const UserModel: any = mongoose.models.User || mongoose.model('User', UserSchema);
+const ConfigModel: any =
+  mongoose.models.PortalConfig || mongoose.model('PortalConfig', PortalConfigSchema);
+const AttendanceModel: any =
+  mongoose.models.Attendance || mongoose.model('Attendance', AttendanceSchema);
 
 function getClientIP(req: NextRequest): string {
   const forwarded = req.headers.get('x-forwarded-for');
