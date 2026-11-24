@@ -1,6 +1,34 @@
 import { NextRequest, NextResponse } from 'next/server';
 import mongoose from 'mongoose';
-import dbConnect from '@/lib/db';
+
+const MONGODB_URI = process.env.MONGODB_URI || '';
+
+const globalWithMongoose = globalThis as typeof globalThis & {
+  _mongooseAuthCache?: {
+    conn: typeof mongoose | null;
+    promise: Promise<typeof mongoose> | null;
+  };
+};
+
+const cachedDb = globalWithMongoose._mongooseAuthCache || {
+  conn: null,
+  promise: null,
+};
+globalWithMongoose._mongooseAuthCache = cachedDb;
+
+async function connectMongo() {
+  if (!MONGODB_URI) {
+    throw new Error('MONGODB_URI environment variable is missing.');
+  }
+  if (cachedDb.conn) return cachedDb.conn;
+  if (!cachedDb.promise) {
+    cachedDb.promise = mongoose.connect(MONGODB_URI, {
+      bufferCommands: false,
+    });
+  }
+  cachedDb.conn = await cachedDb.promise;
+  return cachedDb.conn;
+}
 
 const UserSchema = new mongoose.Schema(
   {
@@ -42,7 +70,7 @@ function getClientIP(req: NextRequest): string {
 
 export async function POST(req: NextRequest) {
   try {
-    await dbConnect();
+    await connectMongo();
     const body: any = await req.json();
     const email = String(body?.email || '')
       .toLowerCase()
