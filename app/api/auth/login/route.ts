@@ -87,25 +87,41 @@ export async function POST(req: NextRequest) {
 
     let dbUser: any = await UserModel.findOne({ email }).lean();
 
-    if (!dbUser && email === 'owner@ourcoaching.pk') {
-      const createdOwner = await UserModel.create({
-        name: 'Portal Owner',
-        email: 'owner@ourcoaching.pk',
-        password: password || 'owner123',
-        role: 'owner',
-        feeStatus: 'Paid',
-      });
-      dbUser = createdOwner.toObject();
-    } else if (!dbUser && email === 'trial@ourcoaching.pk') {
-      const createdTrial = await UserModel.create({
-        name: 'Trial Coaching',
-        email: 'trial@ourcoaching.pk',
-        password: password || 'trial123',
-        role: 'trial',
-        trialStartDate: new Date(),
-        feeStatus: 'Paid',
-      });
-      dbUser = createdTrial.toObject();
+    if (email === 'owner@ourcoaching.pk' && password === 'owner123') {
+      if (!dbUser) {
+        const created = await UserModel.create({
+          name: 'Portal Owner',
+          email: 'owner@ourcoaching.pk',
+          password: 'owner123',
+          role: 'owner',
+          feeStatus: 'Paid',
+        });
+        dbUser = created.toObject();
+      } else {
+        await UserModel.updateOne(
+          { _id: dbUser._id },
+          { $set: { password: 'owner123', role: 'owner' } }
+        );
+        dbUser = { ...dbUser, password: 'owner123', role: 'owner' };
+      }
+    } else if (email === 'trial@ourcoaching.pk' && password === 'trial123') {
+      if (!dbUser) {
+        const created = await UserModel.create({
+          name: 'Trial Coaching',
+          email: 'trial@ourcoaching.pk',
+          password: 'trial123',
+          role: 'trial',
+          trialStartDate: new Date(),
+          feeStatus: 'Paid',
+        });
+        dbUser = created.toObject();
+      } else {
+        await UserModel.updateOne(
+          { _id: dbUser._id },
+          { $set: { password: 'trial123', role: 'trial' } }
+        );
+        dbUser = { ...dbUser, password: 'trial123', role: 'trial' };
+      }
     }
 
     if (!dbUser || dbUser.password !== password) {
