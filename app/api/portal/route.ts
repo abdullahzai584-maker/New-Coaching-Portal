@@ -1,191 +1,211 @@
 import { NextRequest, NextResponse } from 'next/server';
-import bcrypt from 'bcryptjs';
-import { jwtVerify } from 'jose';
-import mongoose, { Schema, model, models } from 'mongoose';
+import dbConnect from '@/lib/db';
+import User from '@/models/User';
+import PortalConfig from '@/models/PortalConfig';
+import Attendance from '@/models/Attendance';
 
-const MONGODB_URI = process.env.MONGODB_URI!;
-const secret = new TextEncoder().encode(process.env.JWT_SECRET || 'fallback_secret_key_2026');
-
-let cached = (global as any).mongoose || { conn: null, promise: null };
-
-async function connectDB() {
-  if (!MONGODB_URI) {
-    throw new Error('Please define MONGODB_URI in .env.local');
-  }
-  if (cached.conn) return cached.conn;
-  if (!cached.promise) {
-    cached.promise = mongoose.connect(MONGODB_URI, { bufferCommands: false }).then((m) => m);
-  }
-  cached.conn = await cached.promise;
-  return cached.conn;
-}
-
-const UserSchema = new Schema({
-  name: { type: String, required: true },
-  email: { type: String, required: true, unique: true, lowercase: true },
-  password: { type: String, required: true },
-  plainPasswordHint: { type: String },
-  role: { type: String, enum: ['owner', 'trial', 'teacher', 'student'], required: true },
-  classGrade: { type: String, default: 'General' },
-  feeStatus: { type: String, enum: ['Paid', 'Pending'], default: 'Paid' },
-  createdBy: { type: String },
-  createdAt: { type: Date, default: Date.now },
-});
-
-const SystemConfigSchema = new Schema({
-  key: { type: String, default: 'GLOBAL_CONFIG', unique: true },
-  killSwitchActive: { type: Boolean, default: false },
-  killSwitchMessage: {
-    type: String,
-    default: 'Portal suspended due to pending subscription clearance. Contact Administration.',
-  },
-  ipAttendanceLock: { type: Boolean, default: false },
-  allowedCoachingIP: { type: String, default: '' },
-});
-
-const AttendanceSchema = new Schema({
-  studentId: { type: Schema.Types.ObjectId, ref: 'User', required: true },
-  studentName: { type: String, required: true },
-  date: { type: String, required: true },
-  status: { type: String, enum: ['Present', 'Absent'], default: 'Present' },
-  markedBy: { type: String },
-  ipUsed: { type: String },
-});
-
-const User = models.User || model('User', UserSchema);
-const SystemConfig = models.SystemConfig || model('SystemConfig', SystemConfigSchema);
-const Attendance = models.Attendance || model('Attendance', AttendanceSchema);
-
-async function verifyToken(token: string) {
-  try {
-    const { payload } = await jwtVerify(token, secret);
-    return payload;
-  } catch {
-    return null;
-  }
-}
+const UserModel: any = User;
+const ConfigModel: any = PortalConfig;
+const AttendanceModel: any = Attendance;
 
 function getClientIP(req: NextRequest): string {
   const forwarded = req.headers.get('x-forwarded-for');
-  if (forwarded) return forwarded.split(',')[0].trim();
+  if (forwarded) {
+    return forwarded.split(',')[0].trim();
+  }
   return req.headers.get('x-real-ip') || '127.0.0.1';
 }
 
-export async function GET(req: NextRequest) {
-  await connectDB();
-  const token = req.cookies.get('coaching_token')?.value;
-  const decoded: any = token ? await verifyToken(token) : null;
-  if (!decoded) return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
+async function getCurrentUser(req: NextRequest) {
+  const sessionId = req.cookies.get('portal_session')?.value;
+  if (!sessionId) return null;
+  const u: any = await UserModel.findById(sessionId).lean();
+  if (!u) return null;
+  return {
+    ...u,
+    id: String(u._id),
+  };
+}
 
-  const config = await SystemConfig.findOne({ key: 'GLOBAL_CONFIG' });
-  if (config?.killSwitchActive && decoded.role !== 'owner') {
+export async function GET(req: NextRequest) {
+  try {
+    await dbConnect();
+    const user = await getCurrentUser(req);
+    if (!user) {
+      return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
+    }
+
+    const currentIP = getClientIP(req);
+    let config: any = await ConfigModel.findOne({ key: 'main_portal' }).lean();
+
+    if (!config) {
+      config = {
+        key: 'main_portal',
+        killSwitchActive: false,
+        ipAttendanceLock: false,
+        allowedCoachingIP: currentIP,
+      };
+    }
+
+    const todayStr = new Date().toISOString().split('T')[0];
+    const students = await UserModel.find({ role: 'student' }).sort({ createdAt: -1 }).lean();
+    const teachers = await UserModel.find({ role: 'teacher' }).sort({ createdAt: -1 }).lean();
+    const attendance = await AttendanceModel.find({ date: todayStr }).lean();
+
+    let trialDaysLeft: number | undefined;
+    if (user.role === 'trial') {
+      const startDate = user.trialStartDate ? new Date(user.trialStartDate) : new Date();
+      const elapsedDays = Math.floor(
+        (Date.now() - startDate.getTime()) / (1000 * 60 * 60 * 24)
+      );
+      trialDaysLeft = Math.max(0, 4 - elapsedDays);
+    }
+
+    return NextResponse.json({
+      user: {
+        id: user.id,
+        name: user.name,
+        email: user.email,
+        role: user.role,
+        classGrade: user.classGrade || '',
+        feeStatus: user.feeStatus || 'Paid',
+        trialDaysLeft,
+      },
+      currentIP,
+      config,
+      students,
+      teachers,
+      attendance,
+    });
+  } catch (err: any) {
     return NextResponse.json(
-      { error: 'PORTAL_KILLED', message: config.killSwitchMessage },
-      { status: 403 }
+      { error: err?.message || 'Data load karne mein masla aaya.' },
+      { status: 500 }
     );
   }
-
-  const students = await User.find({ role: 'student' }).sort({ createdAt: -1 }).lean();
-  const teachers = await User.find({ role: 'teacher' }).sort({ createdAt: -1 }).lean();
-  const today = new Date().toISOString().split('T')[0];
-  const attendance = await Attendance.find({ date: today }).lean();
-  const currentIP = getClientIP(req);
-
-  return NextResponse.json({
-    user: decoded,
-    config,
-    students,
-    teachers,
-    attendance,
-    currentIP,
-  });
 }
 
 export async function POST(req: NextRequest) {
-  await connectDB();
-  const token = req.cookies.get('coaching_token')?.value;
-  const decoded: any = token ? await verifyToken(token) : null;
-  if (!decoded) return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
+  try {
+    await dbConnect();
+    const user = await getCurrentUser(req);
+    if (!user) {
+      return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
+    }
 
-  const body = await req.json();
-  const clientIP = getClientIP(req);
-  const today = new Date().toISOString().split('T')[0];
+    const body: any = await req.json();
+    const action = String(body?.action || '');
+    const currentIP = getClientIP(req);
 
-  if (body.action === 'TOGGLE_KILL_SWITCH' && decoded.role === 'owner') {
-    const config = await SystemConfig.findOneAndUpdate(
-      { key: 'GLOBAL_CONFIG' },
-      { killSwitchActive: body.state },
-      { new: true, upsert: true }
-    );
-    return NextResponse.json({ success: true, config });
-  }
+    if (action === 'TOGGLE_KILL_SWITCH') {
+      if (user.role !== 'owner') {
+        return NextResponse.json({ error: 'Sirf Owner allowed hai.' }, { status: 403 });
+      }
+      const state = Boolean(body?.state);
+      await ConfigModel.findOneAndUpdate(
+        { key: 'main_portal' },
+        { $set: { key: 'main_portal', killSwitchActive: state } },
+        { upsert: true, new: true }
+      );
+      return NextResponse.json({ ok: true, killSwitchActive: state });
+    }
 
-  if (body.action === 'TOGGLE_IP_LOCK' && ['owner', 'teacher', 'trial'].includes(decoded.role)) {
-    const config = await SystemConfig.findOneAndUpdate(
-      { key: 'GLOBAL_CONFIG' },
-      { ipAttendanceLock: body.state, allowedCoachingIP: body.state ? clientIP : '' },
-      { new: true, upsert: true }
-    );
-    return NextResponse.json({ success: true, config });
-  }
+    if (action === 'TOGGLE_IP_LOCK') {
+      if (!['owner', 'teacher', 'trial'].includes(user.role)) {
+        return NextResponse.json({ error: 'Permission denied.' }, { status: 403 });
+      }
+      const state = Boolean(body?.state);
+      await ConfigModel.findOneAndUpdate(
+        { key: 'main_portal' },
+        {
+          $set: {
+            key: 'main_portal',
+            ipAttendanceLock: state,
+            allowedCoachingIP: currentIP,
+          },
+        },
+        { upsert: true, new: true }
+      );
+      return NextResponse.json({ ok: true, ipAttendanceLock: state });
+    }
 
-  if (body.action === 'ADD_USER' && ['owner', 'teacher', 'trial'].includes(decoded.role)) {
-    const { name, email, password, role, classGrade, feeStatus } = body;
-    const exists = await User.findOne({ email: email.toLowerCase().trim() });
-    if (exists) return NextResponse.json({ error: 'Email already registered!' }, { status: 400 });
+    if (action === 'ADD_USER') {
+      if (!['owner', 'teacher', 'trial'].includes(user.role)) {
+        return NextResponse.json({ error: 'Permission denied.' }, { status: 403 });
+      }
+      const cleanEmail = String(body?.email || '')
+        .toLowerCase()
+        .trim();
+      const role = body?.role === 'teacher' ? 'teacher' : 'student';
+      const createdUser: any = await UserModel.create({
+        name: String(body?.name || '').trim(),
+        email: cleanEmail,
+        password: String(body?.password || '123456'),
+        plainPasswordHint: String(body?.password || '123456'),
+        role,
+        classGrade: String(body?.classGrade || '10th Matric').trim(),
+        feeStatus: body?.feeStatus === 'Pending' ? 'Pending' : 'Paid',
+      });
+      return NextResponse.json({ ok: true, user: createdUser });
+    }
 
-    const hashedPassword = await bcrypt.hash(password, 10);
-    const newUser = await User.create({
-      name,
-      email: email.toLowerCase().trim(),
-      password: hashedPassword,
-      plainPasswordHint: password,
-      role: role || 'student',
-      classGrade: classGrade || '10th Matric',
-      feeStatus: feeStatus || 'Paid',
-      createdBy: decoded.email,
-    });
-    return NextResponse.json({ success: true, user: newUser });
-  }
+    if (action === 'DELETE_USER') {
+      if (!['owner', 'teacher', 'trial'].includes(user.role)) {
+        return NextResponse.json({ error: 'Permission denied.' }, { status: 403 });
+      }
+      const userId = String(body?.userId || '');
+      if (userId) {
+        await UserModel.deleteOne({ _id: userId });
+      }
+      return NextResponse.json({ ok: true });
+    }
 
-  if (body.action === 'DELETE_USER' && ['owner', 'teacher'].includes(decoded.role)) {
-    await User.findByIdAndDelete(body.userId);
-    return NextResponse.json({ success: true });
-  }
+    if (action === 'MARK_ATTENDANCE') {
+      const config: any = await ConfigModel.findOne({ key: 'main_portal' }).lean();
 
-  if (body.action === 'MARK_ATTENDANCE') {
-    const config = await SystemConfig.findOne({ key: 'GLOBAL_CONFIG' });
-
-    if (decoded.role === 'student') {
-      if (config?.ipAttendanceLock && config.allowedCoachingIP !== clientIP) {
+      if (
+        user.role === 'student' &&
+        config?.ipAttendanceLock &&
+        config?.allowedCoachingIP &&
+        config.allowedCoachingIP !== currentIP
+      ) {
         return NextResponse.json(
           {
-            error: `IP Security Active: Aapki IP (${clientIP}) Coaching Wi-Fi (${config.allowedCoachingIP}) se match nahi kar rahi! Coaching aakar present lagayein.`,
+            error: `Attendance lock active! Coaching Wi-Fi IP (${config.allowedCoachingIP}) se connect karein. Aapka IP: ${currentIP}`,
           },
           { status: 403 }
         );
       }
+
+      const targetStudentId =
+        user.role === 'student' ? String(user.id) : String(body?.studentId || user.id);
+      const targetStudentName =
+        user.role === 'student' ? String(user.name) : String(body?.studentName || 'Student');
+      const status = body?.status === 'Absent' ? 'Absent' : 'Present';
+      const todayStr = new Date().toISOString().split('T')[0];
+
+      await AttendanceModel.findOneAndUpdate(
+        { studentId: targetStudentId, date: todayStr },
+        {
+          $set: {
+            studentId: targetStudentId,
+            studentName: targetStudentName,
+            date: todayStr,
+            status,
+            markedBy: `${user.name} (${user.role}) • IP ${currentIP}`,
+          },
+        },
+        { upsert: true, new: true }
+      );
+
+      return NextResponse.json({ ok: true, status });
     }
 
-    const targetId = decoded.role === 'student' ? decoded.id : body.studentId;
-    const targetName = decoded.role === 'student' ? decoded.name : body.studentName;
-    const status = decoded.role === 'student' ? 'Present' : body.status;
-
-    await Attendance.findOneAndUpdate(
-      { studentId: targetId, date: today },
-      {
-        studentId: targetId,
-        studentName: targetName,
-        date: today,
-        status,
-        markedBy: decoded.role === 'student' ? 'Student (Self-IP Verified)' : `Teacher (${decoded.name})`,
-        ipUsed: clientIP,
-      },
-      { upsert: true, new: true }
+    return NextResponse.json({ error: 'Unknown action' }, { status: 400 });
+  } catch (err: any) {
+    return NextResponse.json(
+      { error: err?.message || 'Action complete nahi ho saka.' },
+      { status: 500 }
     );
-
-    return NextResponse.json({ success: true });
   }
-
-  return NextResponse.json({ error: 'Invalid Action' }, { status: 400 });
 }
